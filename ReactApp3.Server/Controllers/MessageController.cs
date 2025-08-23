@@ -16,10 +16,19 @@ namespace ReactApp3.Server.Controllers
             _databaseContext = new DatabaseContext(connect);
         }
 
-        [HttpGet]
-        public async Task<ActionResult<IEnumerable<Message>>> GetMessage()
+        [HttpGet("users")]
+        public async Task<ActionResult<IEnumerable<User>>> GetUsers()
         {
-            var messages = await _databaseContext.GetMessagesAsync();
+            var users = await _databaseContext.GetUsersAsync();
+            return Ok(users);
+        }
+
+        [HttpGet("history/{selectedUserId}")]
+        public async Task<ActionResult<IEnumerable<Message>>> GetMessageHistory(int selectedUserId)
+        {
+            // Здесь нужно получить currentUserId из аутентификации
+            // Для примера используем 1
+            var messages = await _databaseContext.GetMessagesAsync(1, selectedUserId);
             return Ok(messages);
         }
     }

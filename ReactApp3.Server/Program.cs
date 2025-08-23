@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Hosting;
 using ReactApp3.Server.Hubs;
 
@@ -35,6 +36,10 @@ var app = builder.Build();
 
 app.UseRouting();
 
+
+
+ 
+
 // Применяем CORS
 app.UseCors("CorsPolicy");
 
@@ -43,5 +48,7 @@ app.UseEndpoints(endpoints =>
 {
     endpoints.MapHub<ChatHub>("/chatHub");
 });
+
+ 
 
 app.Run();
