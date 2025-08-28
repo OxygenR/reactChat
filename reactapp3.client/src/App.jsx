@@ -21,6 +21,9 @@ function App() {
     const [searchTerm, setSearchTerm] = useState('');
     const [searchResults, setSearchResults] = useState([]);
     const [isSearching, setIsSearching] = useState(false);
+    const [clipboardPermission, setClipboardPermission] = useState(false);
+    const [selectedMessages, setSelectedMessages] = useState(new Set());
+    const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
 
     const [contextMenu, setContextMenu] = useState({
         visible: false,
@@ -31,7 +34,8 @@ function App() {
 
     const [forwardDialog, setForwardDialog] = useState({
         visible: false,
-        comment: ''
+        comment: '',
+        multiple: false
     });
 
     useEffect(() => {
@@ -169,6 +173,29 @@ function App() {
     }, []);
 
     useEffect(() => {
+        // Проверка разрешения на доступ к буферу обмена
+        const checkClipboardPermission = async () => {
+            try {
+                if (navigator.permissions) {
+                    const permissionStatus = await navigator.permissions.query({
+                        name: 'clipboard-read'
+                    });
+
+                    setClipboardPermission(permissionStatus.state === 'granted');
+
+                    permissionStatus.onchange = () => {
+                        setClipboardPermission(permissionStatus.state === 'granted');
+                    };
+                }
+            } catch (error) {
+                console.log('Проверка разрешения буфера обмена не поддерживается:', error);
+            }
+        };
+
+        checkClipboardPermission();
+    }, []);
+
+    useEffect(() => {
         if (connection && !connectionStarted.current) {
             connectionStarted.current = true;
 
@@ -203,6 +230,12 @@ function App() {
                     const deletedId = parseInt(messageId);
                     return msgId !== deletedId;
                 }));
+                // Удаляем сообщение из выбранных
+                setSelectedMessages(prev => {
+                    const newSet = new Set(prev);
+                    newSet.delete(messageId.toString());
+                    return newSet;
+                });
             });
 
             connection.on('MessageEdited', (editedMessage) => {
@@ -322,6 +355,9 @@ function App() {
         try {
             const history = await connection.invoke('GetMessageHistory', userId);
             setMessages(history.map(normalizeMessage));
+            // Сбрасываем выбранные сообщения при смене чата
+            setSelectedMessages(new Set());
+            setIsMultiSelectMode(false);
         } catch (error) {
             console.error('Ошибка загрузки истории:', error);
         }
@@ -337,33 +373,86 @@ function App() {
         });
     };
 
+    const toggleMessageSelection = (messageId) => {
+        setSelectedMessages(prev => {
+            const newSet = new Set(prev);
+            if (newSet.has(messageId)) {
+                newSet.delete(messageId);
+            } else {
+                newSet.add(messageId);
+            }
+            return newSet;
+        });
+    };
+
+    const selectAllMessages = () => {
+        const allMessageIds = messages.map(msg => msg.messageId.toString());
+        setSelectedMessages(new Set(allMessageIds));
+    };
+
+    const clearSelection = () => {
+        setSelectedMessages(new Set());
+    };
+
     const forwardMessage = async (receiverId, additionalText = "") => {
-        if (!connection || !contextMenu.message) return;
+        if (!connection) return;
+
         try {
-            await connection.invoke('ForwardMessage',
-                contextMenu.message.messageId,
-                receiverId,
-                additionalText
-            );
+            if (forwardDialog.multiple && selectedMessages.size > 0) {
+                // Пересылка нескольких сообщений
+                for (const messageId of selectedMessages) {
+                    const message = messages.find(msg => msg.messageId.toString() === messageId);
+                    if (message) {
+                        await connection.invoke('ForwardMessage',
+                            message.messageId,
+                            receiverId,
+                            additionalText
+                        );
+                    }
+                }
+            } else if (contextMenu.message) {
+                // Пересылка одного сообщения
+                await connection.invoke('ForwardMessage',
+                    contextMenu.message.messageId,
+                    receiverId,
+                    additionalText
+                );
+            }
+
             setContextMenu({ visible: false, x: 0, y: 0, message: null });
-            setForwardDialog({ visible: false, comment: '' });
+            setForwardDialog({ visible: false, comment: '', multiple: false });
+            setSelectedMessages(new Set());
+            setIsMultiSelectMode(false);
         } catch (error) {
             console.error('Ошибка при пересылке сообщения:', error);
             alert('Не удалось переслать сообщение');
         }
     };
 
-    const deleteMessage = async () => {
-        if (!connection || !contextMenu.message) return;
-        if (window.confirm('Вы уверены, что хотите удалить это сообщение?')) {
+    const deleteMessage = async (messageId = null) => {
+        if (!connection) return;
+
+        const messageIdsToDelete = messageId ? [messageId] : Array.from(selectedMessages);
+
+        if (messageIdsToDelete.length === 0) return;
+
+        if (window.confirm(`Вы уверены, что хотите удалить ${messageIdsToDelete.length} сообщений?`)) {
             try {
-                await connection.invoke('DeleteMessage', contextMenu.message.messageId);
+                for (const id of messageIdsToDelete) {
+                    await connection.invoke('DeleteMessage', id);
+                }
+                setSelectedMessages(new Set());
+                setIsMultiSelectMode(false);
             } catch (error) {
                 console.error('Ошибка при удалении сообщения:', error);
                 alert('Не удалось удалить сообщение');
             }
         }
         setContextMenu({ visible: false, x: 0, y: 0, message: null });
+    };
+
+    const deleteSelectedMessages = async () => {
+        await deleteMessage();
     };
 
     const editMessage = async () => {
@@ -703,8 +792,6 @@ function App() {
         }
     };
 
-
-
     const uploadFileToServer = async (file) => {
         if (!connection || !selectedUser) return;
 
@@ -796,7 +883,7 @@ function App() {
     };
 
     const insertFileLink = () => {
-        const filePath = prompt('Введите путь к файлу или папке:');
+        const filePath = prompt('Введите путь к файлу или пастке:');
         if (filePath) {
             setMessageText(prev => prev ? `${prev} ${filePath}` : filePath);
         }
@@ -806,6 +893,55 @@ function App() {
         const url = prompt('Введите URL ссылку:');
         if (url) {
             setMessageText(prev => prev ? `${prev} ${url}` : url);
+        }
+    };
+
+    // Функция для вставки изображения из буфера обмена
+    const pasteImageFromClipboard = async () => {
+        try {
+            // Проверяем поддержку API буфера обмена
+            if (!navigator.clipboard || !navigator.clipboard.read) {
+                alert('Вставка из буфера обмена не поддерживается в вашем браузере');
+                return;
+            }
+
+            // Получаем разрешение на доступ к буферу обмена
+            const permissionStatus = await navigator.permissions.query({
+                name: 'clipboard-read'
+            });
+
+            if (permissionStatus.state === 'denied') {
+                alert('Доступ к буферу обмена запрещен. Разрешите доступ в настройках браузера.');
+                return;
+            }
+
+            // Читаем содержимое буфера обмена
+            const clipboardItems = await navigator.clipboard.read();
+
+            for (const clipboardItem of clipboardItems) {
+                // Ищем изображения в буфере обмена
+                for (const type of clipboardItem.types) {
+                    if (type.startsWith('image/')) {
+                        const blob = await clipboardItem.getType(type);
+
+                        // Создаем файл из blob
+                        const file = new File([blob], 'clipboard-image.png', {
+                            type: blob.type,
+                            lastModified: Date.now()
+                        });
+
+                        // Загружаем файл
+                        uploadFileToServer(file);
+                        return;
+                    }
+                }
+            }
+
+            // Если изображений не найдено
+            alert('В буфере обмена нет изображений');
+        } catch (error) {
+            console.error('Ошибка при вставке из буфера обмена:', error);
+            alert('Не удалось вставить изображение из буфера обмена: ' + error.message);
         }
     };
 
@@ -830,6 +966,31 @@ function App() {
                 uploadFileToServer(file);
             } else {
                 alert('Файл слишком большой. Максимальный размер: 10MB');
+            }
+        }
+    };
+
+    // Обработчик вставки через Ctrl+V
+    const handlePaste = async (e) => {
+        // Проверяем, есть ли изображения в буфере обмена
+        if (e.clipboardData && e.clipboardData.items) {
+            const items = e.clipboardData.items;
+
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].type.indexOf('image') !== -1) {
+                    e.preventDefault();
+                    const blob = items[i].getAsFile();
+
+                    if (blob) {
+                        const file = new File([blob], 'pasted-image.png', {
+                            type: blob.type,
+                            lastModified: Date.now()
+                        });
+
+                        uploadFileToServer(file);
+                    }
+                    return;
+                }
             }
         }
     };
@@ -913,7 +1074,7 @@ function App() {
                             <div className="context-menu-item" onClick={editMessage}>
                                 ✏️ Редактировать
                             </div>
-                            <div className="context-menu-item" onClick={deleteMessage}>
+                            <div className="context-menu-item" onClick={() => deleteMessage(contextMenu.message.messageId)}>
                                 🗑️ Удалить
                             </div>
                         </>
@@ -923,7 +1084,8 @@ function App() {
                         onClick={() => {
                             setForwardDialog({
                                 visible: true,
-                                comment: ''
+                                comment: '',
+                                multiple: false
                             });
                         }}
                     >
@@ -939,14 +1101,24 @@ function App() {
             )}
 
             {forwardDialog.visible && (
-                <div className="modal-overlay" onClick={() => setForwardDialog({ visible: false, comment: '' })}>
+                <div className="modal-overlay" onClick={() => setForwardDialog({ visible: false, comment: '', multiple: false })}>
                     <div className="path-modal" onClick={(e) => e.stopPropagation()}>
-                        <h3>📤 Переслать сообщение</h3>
+                        <h3>📤 Переслать сообщение{forwardDialog.multiple && ' (несколько)'}</h3>
                         <div className="path-content">
-                            <strong>От:</strong> {contextMenu.message?.sender?.displayName}
-                            <br />
-                            <strong>Текст:</strong> {contextMenu.message?.messageText?.substring(0, 100)}
-                            {contextMenu.message?.messageText?.length > 100 ? '...' : ''}
+                            {forwardDialog.multiple ? (
+                                <>
+                                    <strong>Количество:</strong> {selectedMessages.size} сообщений
+                                    <br />
+                                    <strong>От:</strong> Вы
+                                </>
+                            ) : (
+                                <>
+                                    <strong>От:</strong> {contextMenu.message?.sender?.displayName}
+                                    <br />
+                                    <strong>Текст:</strong> {contextMenu.message?.messageText?.substring(0, 100)}
+                                    {contextMenu.message?.messageText?.length > 100 ? '...' : ''}
+                                </>
+                            )}
                         </div>
 
                         <div style={{ margin: '15px 0' }}>
@@ -997,7 +1169,7 @@ function App() {
                         <div className="modal-buttons">
                             <button
                                 className="modal-button close-button"
-                                onClick={() => setForwardDialog({ visible: false, comment: '' })}
+                                onClick={() => setForwardDialog({ visible: false, comment: '', multiple: false })}
                             >
                                 Отмена
                             </button>
@@ -1140,14 +1312,69 @@ function App() {
                                     </div>
                                 </div>
 
-                                <div className="connection-status">
-                                    <span className={`status-dot ${connectionStatus.toLowerCase()}`}></span>
-                                    {connectionStatus}
-                                    {connectionStatus !== 'Connected' && (
-                                        <button onClick={reconnect} className="reconnect-btn">
-                                            ↻
+                                <div className="header-right">
+                                    {isMultiSelectMode && selectedMessages.size > 0 && (
+                                        <div className="multi-select-actions">
+                                            <span className="selected-count">
+                                                Выбрано: {selectedMessages.size}
+                                            </span>
+                                            <button
+                                                onClick={() => setForwardDialog({ visible: true, comment: '', multiple: true })}
+                                                className="multi-action-btn"
+                                                title="Переслать выбранные"
+                                            >
+                                                📤
+                                            </button>
+                                            <button
+                                                onClick={deleteSelectedMessages}
+                                                className="multi-action-btn delete"
+                                                title="Удалить выбранные"
+                                            >
+                                                🗑️
+                                            </button>
+                                            <button
+                                                onClick={selectAllMessages}
+                                                className="multi-action-btn"
+                                                title="Выбрать все"
+                                            >
+                                                ☑️
+                                            </button>
+                                            <button
+                                                onClick={clearSelection}
+                                                className="multi-action-btn"
+                                                title="Очистить выбор"
+                                            >
+                                                ❌
+                                            </button>
+                                            <button
+                                                onClick={() => setIsMultiSelectMode(false)}
+                                                className="multi-action-btn"
+                                                title="Выйти из режима выбора"
+                                            >
+                                                ←
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    {!isMultiSelectMode && (
+                                        <button
+                                            onClick={() => setIsMultiSelectMode(true)}
+                                            className="multi-select-toggle"
+                                            title="Режим выбора сообщений"
+                                        >
+                                            ☑️
                                         </button>
                                     )}
+
+                                    <div className="connection-status">
+                                        <span className={`status-dot ${connectionStatus.toLowerCase()}`}></span>
+                                        {connectionStatus}
+                                        {connectionStatus !== 'Connected' && (
+                                            <button onClick={reconnect} className="reconnect-btn">
+                                                ↻
+                                            </button>
+                                        )}
+                                    </div>
                                 </div>
                             </div>
 
@@ -1163,9 +1390,25 @@ function App() {
                                         <div
                                             key={msg.messageId || index}
                                             className={`message ${msg.senderId === currentUser?.userId ? 'own' : 'other'} ${msg.isForwarded ? 'message-forwarded' : ''
-                                                }`}
+                                                } ${isMultiSelectMode ? 'selectable' : ''} ${selectedMessages.has(msg.messageId.toString()) ? 'selected' : ''}`}
                                             onContextMenu={(e) => handleContextMenu(e, msg)}
+                                            onClick={(e) => {
+                                                if (isMultiSelectMode) {
+                                                    e.stopPropagation();
+                                                    toggleMessageSelection(msg.messageId);
+                                                }
+                                            }}
                                         >
+                                            {isMultiSelectMode && (
+                                                <div className="message-checkbox">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={selectedMessages.has(msg.messageId.toString())}
+                                                        onChange={() => toggleMessageSelection(msg.messageId)}
+                                                        onClick={(e) => e.stopPropagation()}
+                                                    />
+                                                </div>
+                                            )}
                                             {msg.isForwarded && (
                                                 <div className="message-forwarded-indicator">
                                                     ↪️ Переслано от {msg.originalSender}
@@ -1249,6 +1492,15 @@ function App() {
                                         >
                                             {isUploading ? '⏳' : '📎'}
                                         </button>
+                                        <button
+                                            type="button"
+                                            onClick={pasteImageFromClipboard}
+                                            className="toolbar-btn"
+                                            title="Вставить изображение из буфера обмена"
+                                            disabled={isUploading || !!editingMessage || !clipboardPermission}
+                                        >
+                                            📋
+                                        </button>
                                     </div>
                                     <textarea
                                         value={message}
@@ -1276,6 +1528,7 @@ function App() {
                                         onDragOver={handleDragOver}
                                         onDragLeave={handleDragLeave}
                                         onDrop={handleDrop}
+                                        onPaste={handlePaste}
                                         className={isDragging ? 'dragging' : ''}
                                     />
                                     <button
@@ -1319,6 +1572,8 @@ function App() {
                                 )}
                                 <div className="path-examples">
                                     <small>Примеры: \\server\share\folder или C:\Files\file.txt</small>
+                                    <br />
+                                    <small>Также можно вставлять изображения через Ctrl+V или кнопку 📋</small>
                                 </div>
                             </form>
                         </>
@@ -1338,6 +1593,8 @@ function App() {
                                         <li>Нажмите на ссылку для открытия в проводнике</li>
                                         <li>Используйте кнопки 📁 и 🔗 для быстрой вставки</li>
                                         <li>Загружайте файлы на сервер кнопкой 📎</li>
+                                        <li>Вставляйте изображения из буфера обмена кнопкой 📋 или Ctrl+V</li>
+                                        <li>Новый режим множественного выбора: нажмите ☑️ для выбора нескольких сообщений</li>
                                     </ul>
                                 </div>
                             </div>
