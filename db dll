@@ -1,0 +1,55 @@
+create table users
+(
+    UserId          int auto_increment
+        primary key,
+    WindowsUsername varchar(255)                         not null,
+    DisplayName     varchar(255)                         not null,
+    IsOnline        tinyint(1) default 0                 null,
+    LastSeen        datetime                             not null,
+    CreatedAt       datetime   default CURRENT_TIMESTAMP null,
+    constraint WindowsUsername
+        unique (WindowsUsername)
+);
+
+create table files
+(
+    FileId       int auto_increment
+        primary key,
+    FileName     varchar(255)                       not null,
+    OriginalName varchar(255)                       not null,
+    FilePath     varchar(500)                       not null,
+    FileSize     bigint                             not null,
+    MimeType     varchar(100)                       not null,
+    UserId       int                                not null,
+    UploadedAt   datetime default CURRENT_TIMESTAMP null,
+    constraint files_ibfk_1
+        foreign key (UserId) references users (UserId)
+            on delete cascade
+);
+
+create index UserId
+    on files (UserId);
+
+create table messages
+(
+    MessageId       int auto_increment
+        primary key,
+    SenderId        int                                not null,
+    ReceiverId      int                                not null,
+    MessageText     text                               not null,
+    Timestamp       datetime default CURRENT_TIMESTAMP null,
+    IsEdited        tinyint(1)                         null,
+    EditedTimestamp timestamp                          null,
+    IsDelete        tinyint(1)                         null,
+    constraint messages_ibfk_1
+        foreign key (SenderId) references users (UserId),
+    constraint messages_ibfk_2
+        foreign key (ReceiverId) references users (UserId)
+);
+
+create index ReceiverId
+    on messages (ReceiverId);
+
+create index SenderId
+    on messages (SenderId);
+
