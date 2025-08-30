@@ -407,7 +407,22 @@ namespace ReactApp3.Server.DbContext
                 throw;
             }
         }
+        public async Task<int> CreateUserAsync(string windowsUsername, string displayName)
+        {
+            using (var conn = new MySqlConnection(_connectionString))
+            {
+                await conn.OpenAsync();
+                using (var cmd = new MySqlCommand(
+                    "INSERT INTO Users (WindowsUsername, DisplayName, IsOnline, LastSeen) VALUES (@windowsUsername, @displayName, true, @lastSeen); SELECT LAST_INSERT_ID();", conn))
+                {
+                    cmd.Parameters.AddWithValue("@windowsUsername", windowsUsername);
+                    cmd.Parameters.AddWithValue("@displayName", displayName);
+                    cmd.Parameters.AddWithValue("@lastSeen", DateTime.Now);
 
+                    return Convert.ToInt32(await cmd.ExecuteScalarAsync());
+                }
+            }
+        }
         public async Task<FileModel> GetFileByIdAsync(int fileId)
         {
             using (var conn = new MySqlConnection(_connectionString))

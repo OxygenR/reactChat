@@ -8,8 +8,9 @@
         public string MessageText { get; set; }
         public DateTime Timestamp { get; set; }
 
-         
+        public DateTime? EditedTimestamp { get; set; }
 
+        public bool IsEdited { get; set; }
         // Навигационные свойства
         public User Sender { get; set; }
         public User Receiver { get; set; }
