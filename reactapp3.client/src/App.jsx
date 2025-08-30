@@ -146,6 +146,7 @@ function App() {
         window.openLocalImage = (path) => {
             const cleanPath = path.replace(/\\/g, '/');
             window.open(`file:///${cleanPath}`, '_blank', 'noopener,noreferrer');
+
         };
 
         window.copyToClipboard = (text) => {
@@ -506,160 +507,80 @@ function App() {
         let result = '';
 
         if (fileInfo) {
-            const fileSizeFormatted = formatFileSize(fileInfo.FileSize);
-            if (fileInfo.IsImage) {
+            // Извлекаем данные из нового формата
+            const originalName = fileInfo.originalName || fileInfo.OriginalName;
+            const fileSize = fileInfo.fileSize || fileInfo.FileSize;
+            const isImage = fileInfo.isImage || fileInfo.IsImage;
+            const fileUrl = fileInfo.filePath || fileInfo.FileUrl; // используем filePath для сетевого пути
+            const previewUrl = fileInfo.previewUrl; // новое поле для превью
+
+            const fileSizeFormatted = formatFileSize(fileSize);
+
+            if (isImage) {
+                // Используем превью если доступно, иначе оригинальный URL
+                const imageUrl = previewUrl || fileUrl;
+
                 result += `
-                <div class="file-container image-file">
-                    <img src="${fileInfo.FileUrl}" 
-                         alt="${fileInfo.OriginalName}"
-                         class="file-preview"
-                         onerror="this.style.display='none'; this.nextElementSibling.style.display='block'"
-                         onclick="window.openFileInViewer('${fileInfo.FileUrl}', '${fileInfo.OriginalName}')">
-                    <div class="image-fallback" style="display: none;">
-                        <span class="image-icon">🖼️</span>
-                        <span class="image-path">${fileInfo.OriginalName}</span>
-                    </div>
-                    <div class="file-info">
-                        <div class="file-name">${fileInfo.OriginalName}</div>
-                        <div class="file-size">${fileSizeFormatted}</div>
-                        <a href="${fileInfo.FileUrl}" 
-                           download="${fileInfo.OriginalName}"
+            <div class="file-container image-file">
+                <img src="${imageUrl}" 
+                     alt="${originalName}"
+                     class="file-preview"
+                     onerror="handleImageError(this)"
+                     onclick="window.open('${fileUrl}', '_blank')">
+                <div class="image-fallback" style="display: none;">
+                    <span class="image-icon">🖼️</span>
+                    <span class="image-path">${originalName}</span>
+                </div>
+                <div class="file-info">
+                    <div class="file-name">${originalName}</div>
+                    <div class="file-size">${fileSizeFormatted}</div>
+                    <div class="file-actions">
+                        <a href="${fileUrl}" 
+                           download="${originalName}"
                            class="file-download-btn"
                            onclick="event.stopPropagation()">
                             📥 Скачать
                         </a>
                     </div>
                 </div>
+            </div>
             `;
             } else {
+                // Для не-изображений
                 result += `
-                <div class="file-container">
-                    <div class="file-icon">📄</div>
-                    <div class="file-info">
-                        <div class="file-name">${fileInfo.OriginalName}</div>
-                        <div class="file-size">${fileSizeFormatted}</div>
-                        <a href="${fileInfo.FileUrl}" 
-                           download="${fileInfo.OriginalName}"
+            <div class="file-container">
+                <div class="file-icon">📄</div>
+                <div class="file-info">
+                    <div class="file-name">${originalName}</div>
+                    <div class="file-size">${fileSizeFormatted}</div>
+                    <div class="file-actions">
+                        <a href="${fileUrl}" 
+                           download="${originalName}"
                            class="file-download-btn">
-                            📥 Скачать (${fileSizeFormatted})
+                            📥 Скачать
                         </a>
                     </div>
                 </div>
+            </div>
             `;
             }
         }
 
-        // Обработка текстовых ссылок, включая URL файлов
+        // Обработка текстовых сообщений
         if (text) {
-            const linkRegex = /(https?:\/\/[^\s]+|www\.[^\s]+|\\\\[^\s]+\\[^\s]+|[\w]:\\[^\s]+)/gi;
-            const imageExtensions = /\.(jpg|jpeg|png|gif|bmp|webp|svg)$/i;
-            const isHttpUrl = /^https?:\/\//i;
-            const isFileUrl = /http:\/\/localhost:3001\/uploads\//i;
-
-            const formattedText = text.replace(linkRegex, (match) => {
-                // Проверяем, является ли это URL файла с нашего сервера
-                if (isFileUrl.test(match)) {
-                    const fileName = match.split('/').pop();
-                    const isImage = imageExtensions.test(fileName);
-
-                    if (isImage) {
-                        return `
-                    <div class="uploaded-file image-file">
-                        <img src="${match}" 
-                             alt="${fileName}"
-                             class="file-preview"
-                             onerror="this.style.display='none'; this.nextElementSibling.style.display='block'"
-                             onclick="window.openFileInViewer('${match}', '${fileName}')">
-                        <div class="image-fallback" style="display: none;">
-                            <span class="image-icon">🖼️</span>
-                            <span class="image-name">${fileName}</span>
-                        </div>
-                        <div class="file-info">
-                            <a href="${match}" 
-                               download="${fileName}"
-                               class="file-download-link">
-                                📥 ${fileName}
-                            </a>
-                        </div>
-                    </div>
-                    `;
-                    } else {
-                        return `
-                    <div class="uploaded-file">
-                        <div class="file-icon">📄</div>
-                        <div class="file-info">
-                            <a href="${match}" 
-                               download="${fileName}"
-                               class="file-download-link">
-                                📥 ${fileName}
-                            </a>
-                        </div>
-                    </div>
-                    `;
-                    }
-                }
-
-                // Остальная обработка ссылок (как было раньше)
-                let icon = "🔗";
-                let className = "message-link";
-                let isImage = false;
-                let displayText = match;
-
-                if (imageExtensions.test(match)) {
-                    isImage = true;
-                    className = "message-image-link";
-
-                    if (match.match(/^[a-zA-Z]:\\/) || match.startsWith('\\\\')) {
-                        return `
-                    <div class="local-image-container">
-                        <div class="local-image-preview" onclick="window.openLocalImage('${match.replace(/'/g, "\\'")}')">
-                            <span class="local-image-icon">🖼️</span>
-                            <span class="local-image-name">${match.split('\\').pop()}</span>
-                            <span class="local-image-path">${match}</span>
-                        </div>
-                    </div>
-                    `;
-                    }
-
-                    if (isHttpUrl.test(match)) {
-                        return `
-                    <div class="image-container">
-                        <img src="${match}" 
-                             alt="Изображение" 
-                             class="chat-image web-image"
-                             onerror="this.style.display='none'; this.nextElementSibling.style.display='block'"
-                             onclick="window.openImageInNewTab('${match}')">
-                        <div class="image-fallback" style="display: none;">
-                            <span class="image-icon">🖼️</span>
-                            <span class="image-path">${match}</span>
-                        </div>
-                    </div>
-                    `;
-                    }
-                }
-
-                if (match.startsWith('\\\\')) {
-                    icon = "💻";
-                    className = "message-link network-path";
-                } else if (match.match(/^[a-zA-Z]:\\/)) {
-                    icon = "📁";
-                    className = "message-link local-path";
-                } else if (match.startsWith('www.')) {
-                    displayText = `http://${match}`;
-                    icon = "🌐";
-                    className = "message-link web-url";
-                } else if (match.startsWith('http')) {
-                    icon = "🌐";
-                    className = "message-link web-url";
-                }
-
-                return ` <span class="${className}" data-url="${displayText}" data-original="${match}">${icon} ${match}</span> `;
-            });
-
-            result += formattedText;
+            result += `<div class="text-message">${text}</div>`;
         }
 
         return result;
+    };
+
+    // Функция для обработки ошибок загрузки изображений
+    const handleImageError = (imgElement) => {
+        imgElement.style.display = 'none';
+        const fallback = imgElement.nextElementSibling;
+        if (fallback && fallback.classList.contains('image-fallback')) {
+            fallback.style.display = 'block';
+        }
     };
 
     const normalizeMessage = (msg) => {
@@ -713,51 +634,91 @@ function App() {
     };
 
     const formatFileMessage = (fileData) => {
-        const { originalName, fileUrl, fileSize, isImage, text } = fileData;
+        const {
+            originalName,
+            fileSize,
+            isImage,
+            text,
+            serverFileName,
+            previewFileName
+        } = fileData;
+
         const sizeFormatted = formatFileSize(fileSize);
+
+        // Серверные URL
+        const getServerUrl = (fileName) => {
+            return `https://localhost:7192/api/File/download/${encodeURIComponent(fileName)}`;
+        };
+
+        const getPreviewUrl = (fileName) => {
+            return `https://localhost:7192/api/File/preview/${encodeURIComponent(fileName)}`;
+        };
+
+        const imageUrl = previewFileName ? getPreviewUrl(previewFileName) : null;
+        const downloadUrl = getServerUrl(serverFileName || originalName);
 
         let fileHtml = '';
 
-        if (isImage) {
+        if (isImage && imageUrl) {
             fileHtml = `
-            <div class="uploaded-file image-file">
-                <img src="${fileUrl}" 
-                     alt="${originalName}"
-                     class="file-preview"
-                     onerror="this.style.display='none'; this.nextElementSibling.style.display='block'"
-                     onclick="window.openFileInViewer('${fileUrl}', '${originalName}')">
-                <div class="image-fallback" style="display: none;">
-                    <span class="image-icon">🖼️</span>
-                    <span class="image-name">${originalName}</span>
-                </div>
-                <div class="file-info">
-                    <a href="${fileUrl}" 
-                       download="${originalName}"
-                       class="file-download-link"
-                       onclick="event.stopPropagation()">
-                        📥 ${originalName} (${sizeFormatted})
-                    </a>
-                </div>
+        <div class="uploaded-file image-file">
+            <img src="${imageUrl}" 
+                 alt="${originalName}"
+                 class="file-preview"
+                 onerror="this.style.display='none'; this.nextElementSibling.style.display='block'"
+                 onclick="window.open('${downloadUrl}', '_blank')">
+            <div class="image-fallback" style="display: none;">
+                <span class="image-icon">🖼️</span>
+                <span class="image-name">${originalName}</span>
             </div>
-        `;
+            <div class="file-info">
+                <div class="file-name">${originalName}</div>
+                <div class="file-size">${sizeFormatted}</div>
+                <a href="${downloadUrl}" 
+                   download="${originalName}"
+                   class="file-download-link"
+                   onclick="event.stopPropagation()">
+                    📥 Скачать
+                </a>
+            </div>
+        </div>
+    `;
+        } else if (isImage) {
+            // Если нет превью, но это изображение
+            fileHtml = `
+        <div class="uploaded-file">
+            <div class="file-icon">🖼️</div>
+            <div class="file-info">
+                <div class="file-name">${originalName}</div>
+                <div class="file-size">${sizeFormatted}</div>
+                <a href="${downloadUrl}" 
+                   download="${originalName}"
+                   class="file-download-link">
+                    📥 Скачать изображение
+                </a>
+            </div>
+        </div>
+    `;
         } else {
+            // Для не-изображений
             fileHtml = `
-            <div class="uploaded-file">
-                <div class="file-icon">📄</div>
-                <div class="file-info">
-                    <a href="${fileUrl}" 
-                       download="${originalName}"
-                       class="file-download-link">
-                        📥 ${originalName} (${sizeFormatted})
-                    </a>
-                </div>
+        <div class="uploaded-file">
+            <div class="file-icon">📄</div>
+            <div class="file-info">
+                <div class="file-name">${originalName}</div>
+                <div class="file-size">${sizeFormatted}</div>
+                <a href="${downloadUrl}" 
+                   download="${originalName}"
+                   class="file-download-link">
+                    📥 Скачать
+                </a>
             </div>
-        `;
+        </div>
+    `;
         }
 
-        // Добавляем текстовое сообщение если есть
         if (text && text.trim()) {
-            return `${detectAndFormatLinks(text)}<br/>${fileHtml}`;
+            return `<div class="text-content">${detectAndFormatLinks(text)}</div>${fileHtml}`;
         }
 
         return fileHtml;
@@ -803,65 +764,169 @@ function App() {
         setIsUploading(true);
         setUploadProgress(0);
 
+        let fileName = '';
+        let filePath = '';
+        let previewUrl = null;
+
+
         try {
-            // СОЗДАЕМ ПРЕВЬЮ И BLOB URL ДО ТОГО КАК ИСПОЛЬЗОВАТЬ ФАЙЛ
-            let imagePreviewUrl = null;
-            let fileBlobUrl = null;
+            const fileName = `${Date.now()}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('fileName', fileName);
 
-            if (file.type.startsWith('image/')) {
-                imagePreviewUrl = URL.createObjectURL(file);
-            }
+            const backendUrl = 'https://localhost:7192';
+            const apiUrl = `${backendUrl}/api/File/upload`;
 
-            // Создаем Blob URL для скачивания
-            fileBlobUrl = URL.createObjectURL(file);
-
-            // Сохраняем размер ДО использования файла
-            const fileSize = file.size;
-
-            // Теперь используем файл для сохранения
-            const handle = await window.showSaveFilePicker({
-                suggestedName: file.name,
-                types: [{
-                    description: 'Files',
-                    accept: {
-                        [file.type]: file.type.includes('/') ?
-                            [`.${file.type.split('/')[1]}`] :
-                            ['.bin']
-                    }
-                }]
+            const response = await fetch(apiUrl, {
+                method: 'POST',
+                body: formData,
+                credentials: 'include'
             });
 
-            const writable = await handle.createWritable();
-            await writable.write(await file.arrayBuffer());
-            await writable.close();
+            if (!response.ok) throw new Error('Ошибка сохранения файла');
+
+            const result = await response.json();
+            console.log('Файл сохранен через API:', result);
+
+            // Используем серверные URL вместо временных Blob URL
+            const getServerUrl = (fileName) => {
+                return `https://localhost:7192/api/File/download/${encodeURIComponent(fileName)}`;
+            };
+
+            const getPreviewUrl = (fileName) => {
+                return `https://localhost:7192/api/File/preview/${encodeURIComponent(fileName)}`;
+            };
 
             const fileMessage = {
                 type: 'file',
                 originalName: file.name,
-                fileUrl: fileBlobUrl,
-                fileSize: fileSize, // Используем сохраненный размер
+                filePath: result.filePath,
+                fileSize: file.size,
                 text: message,
                 isImage: file.type.startsWith('image/'),
-                previewUrl: imagePreviewUrl
+                mimeType: file.type,
+                previewUrl: result.previewFileName ? getPreviewUrl(result.previewFileName) : null,
+                serverFileName: result.fileName,
+                previewFileName: result.previewFileName,
+                status: 'uploaded'
             };
 
             if (connection.state === 'Connected') {
                 await connection.invoke('SendMessage', selectedUser.userId, JSON.stringify(fileMessage));
                 setMessageText('');
-            } else {
-                throw new Error('Соединение прервано');
             }
+            setIsUploading(false);
 
         } catch (error) {
-            console.error('Ошибка загрузки файла:', error);
+            // ... обработка ошибок
+        }
+    };
 
-            if (connection.state === 'Connected') {
-                await connection.invoke('SendMessage', selectedUser.userId,
-                    `${message ? message + '\n' : ''}📎 Файл: ${file.name} (${formatFileSize(file.size)})`);
+    // Функция для отображения превью изображений
+    const renderFileMessage = (message) => {
+        try {
+            const fileData = JSON.parse(message.messageText);
+
+            return (
+                <div className="file-message" style={{ margin: '10px 0', padding: '10px', border: '1px solid #ddd', borderRadius: '8px' }}>
+                    {/* Текст сообщения */}
+                    {fileData.text && (
+                        <div style={{ marginBottom: '10px' }}>
+                            {fileData.text}
+                        </div>
+                    )}
+
+                    {/* Превью изображения */}
+                    {fileData.isImage && fileData.previewUrl && (
+                        <div style={{ marginBottom: '10px' }}>
+                            <img
+                                src={fileData.previewUrl}
+                                alt={fileData.originalName}
+                                style={{
+                                    maxWidth: '300px',
+                                    maxHeight: '300px',
+                                    borderRadius: '4px',
+                                    cursor: 'pointer'
+                                }}
+                                onClick={() => window.open(fileData.previewUrl, '_blank')}
+                            />
+                        </div>
+                    )}
+
+                    {/* Информация о файле */}
+                    <div style={{ fontSize: '14px', color: '#666' }}>
+                        <div>📎 {fileData.originalName}</div>
+                        <div>📦 {formatFileSize(fileData.fileSize)}</div>
+                        {fileData.status === 'pending' && (
+                            <div style={{ color: '#ff9500' }}>⏳ Файл будет сохранен позже</div>
+                        )}
+                        {fileData.status === 'uploaded' && (
+                            <div style={{ color: '#34c759' }}>✅ Файл сохранен на сервере</div>
+                        )}
+                    </div>
+
+                    {/* Кнопка скачивания */}
+                    <button
+                        onClick={() => downloadFile(fileData)}
+                        style={{
+                            marginTop: '8px',
+                            padding: '6px 12px',
+                            backgroundColor: '#007bff',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '4px',
+                            cursor: 'pointer'
+                        }}
+                    >
+                        📥 Скачать
+                    </button>
+                </div>
+            );
+        } catch (e) {
+            return <div>{message.messageText}</div>;
+        }
+    };
+
+
+    // Функция для скачивания файлов
+    const downloadFile = async (fileData) => {
+        try {
+            if (fileData.status === 'uploaded' && fileData.serverFileName) {
+                // Скачиваем с сервера
+                const response = await fetch(`https://localhost:7192/api/File/download/${fileData.serverFileName}`, {
+                    credentials: 'include'
+                });
+
+                if (response.ok) {
+                    const blob = await response.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = fileData.originalName;
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+                } else {
+                    alert('Не удалось скачать файл');
+                }
+            } else {
+                // Пытаемся использовать Blob URL из превью
+                if (fileData.previewUrl) {
+                    const a = document.createElement('a');
+                    a.href = fileData.previewUrl;
+                    a.download = fileData.originalName;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                } else {
+                    alert('Файл еще не доступен для скачивания');
+                }
             }
-        } finally {
-            setIsUploading(false);
-            setUploadProgress(0);
+        } catch (error) {
+            console.error('Ошибка скачивания:', error);
+            alert('Ошибка при скачивании файла');
         }
     };
 
