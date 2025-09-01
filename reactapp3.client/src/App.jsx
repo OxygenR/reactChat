@@ -21,6 +21,9 @@ function App() {
     const [searchTerm, setSearchTerm] = useState('');
     const [searchResults, setSearchResults] = useState([]);
     const [isSearching, setIsSearching] = useState(false);
+    const [clipboardPermission, setClipboardPermission] = useState(false);
+    const [selectedMessages, setSelectedMessages] = useState(new Set());
+    const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
 
     const [contextMenu, setContextMenu] = useState({
         visible: false,
@@ -31,7 +34,8 @@ function App() {
 
     const [forwardDialog, setForwardDialog] = useState({
         visible: false,
-        comment: ''
+        comment: '',
+        multiple: false
     });
 
     useEffect(() => {
@@ -142,6 +146,7 @@ function App() {
         window.openLocalImage = (path) => {
             const cleanPath = path.replace(/\\/g, '/');
             window.open(`file:///${cleanPath}`, '_blank', 'noopener,noreferrer');
+
         };
 
         window.copyToClipboard = (text) => {
@@ -166,6 +171,29 @@ function App() {
             delete window.openLocalImage;
             delete window.copyToClipboard;
         };
+    }, []);
+
+    useEffect(() => {
+        // Проверка разрешения на доступ к буферу обмена
+        const checkClipboardPermission = async () => {
+            try {
+                if (navigator.permissions) {
+                    const permissionStatus = await navigator.permissions.query({
+                        name: 'clipboard-read'
+                    });
+
+                    setClipboardPermission(permissionStatus.state === 'granted');
+
+                    permissionStatus.onchange = () => {
+                        setClipboardPermission(permissionStatus.state === 'granted');
+                    };
+                }
+            } catch (error) {
+                console.log('Проверка разрешения буфера обмена не поддерживается:', error);
+            }
+        };
+
+        checkClipboardPermission();
     }, []);
 
     useEffect(() => {
@@ -203,6 +231,12 @@ function App() {
                     const deletedId = parseInt(messageId);
                     return msgId !== deletedId;
                 }));
+                // Удаляем сообщение из выбранных
+                setSelectedMessages(prev => {
+                    const newSet = new Set(prev);
+                    newSet.delete(messageId.toString());
+                    return newSet;
+                });
             });
 
             connection.on('MessageEdited', (editedMessage) => {
@@ -322,6 +356,9 @@ function App() {
         try {
             const history = await connection.invoke('GetMessageHistory', userId);
             setMessages(history.map(normalizeMessage));
+            // Сбрасываем выбранные сообщения при смене чата
+            setSelectedMessages(new Set());
+            setIsMultiSelectMode(false);
         } catch (error) {
             console.error('Ошибка загрузки истории:', error);
         }
@@ -337,33 +374,86 @@ function App() {
         });
     };
 
+    const toggleMessageSelection = (messageId) => {
+        setSelectedMessages(prev => {
+            const newSet = new Set(prev);
+            if (newSet.has(messageId)) {
+                newSet.delete(messageId);
+            } else {
+                newSet.add(messageId);
+            }
+            return newSet;
+        });
+    };
+
+    const selectAllMessages = () => {
+        const allMessageIds = messages.map(msg => msg.messageId.toString());
+        setSelectedMessages(new Set(allMessageIds));
+    };
+
+    const clearSelection = () => {
+        setSelectedMessages(new Set());
+    };
+
     const forwardMessage = async (receiverId, additionalText = "") => {
-        if (!connection || !contextMenu.message) return;
+        if (!connection) return;
+
         try {
-            await connection.invoke('ForwardMessage',
-                contextMenu.message.messageId,
-                receiverId,
-                additionalText
-            );
+            if (forwardDialog.multiple && selectedMessages.size > 0) {
+                // Пересылка нескольких сообщений
+                for (const messageId of selectedMessages) {
+                    const message = messages.find(msg => msg.messageId.toString() === messageId);
+                    if (message) {
+                        await connection.invoke('ForwardMessage',
+                            message.messageId,
+                            receiverId,
+                            additionalText
+                        );
+                    }
+                }
+            } else if (contextMenu.message) {
+                // Пересылка одного сообщения
+                await connection.invoke('ForwardMessage',
+                    contextMenu.message.messageId,
+                    receiverId,
+                    additionalText
+                );
+            }
+
             setContextMenu({ visible: false, x: 0, y: 0, message: null });
-            setForwardDialog({ visible: false, comment: '' });
+            setForwardDialog({ visible: false, comment: '', multiple: false });
+            setSelectedMessages(new Set());
+            setIsMultiSelectMode(false);
         } catch (error) {
             console.error('Ошибка при пересылке сообщения:', error);
             alert('Не удалось переслать сообщение');
         }
     };
 
-    const deleteMessage = async () => {
-        if (!connection || !contextMenu.message) return;
-        if (window.confirm('Вы уверены, что хотите удалить это сообщение?')) {
+    const deleteMessage = async (messageId = null) => {
+        if (!connection) return;
+
+        const messageIdsToDelete = messageId ? [messageId] : Array.from(selectedMessages);
+
+        if (messageIdsToDelete.length === 0) return;
+
+        if (window.confirm(`Вы уверены, что хотите удалить ${messageIdsToDelete.length} сообщений?`)) {
             try {
-                await connection.invoke('DeleteMessage', contextMenu.message.messageId);
+                for (const id of messageIdsToDelete) {
+                    await connection.invoke('DeleteMessage', id);
+                }
+                setSelectedMessages(new Set());
+                setIsMultiSelectMode(false);
             } catch (error) {
                 console.error('Ошибка при удалении сообщения:', error);
                 alert('Не удалось удалить сообщение');
             }
         }
         setContextMenu({ visible: false, x: 0, y: 0, message: null });
+    };
+
+    const deleteSelectedMessages = async () => {
+        await deleteMessage();
     };
 
     const editMessage = async () => {
@@ -417,160 +507,80 @@ function App() {
         let result = '';
 
         if (fileInfo) {
-            const fileSizeFormatted = formatFileSize(fileInfo.FileSize);
-            if (fileInfo.IsImage) {
+            // Извлекаем данные из нового формата
+            const originalName = fileInfo.originalName || fileInfo.OriginalName;
+            const fileSize = fileInfo.fileSize || fileInfo.FileSize;
+            const isImage = fileInfo.isImage || fileInfo.IsImage;
+            const fileUrl = fileInfo.filePath || fileInfo.FileUrl; // используем filePath для сетевого пути
+            const previewUrl = fileInfo.previewUrl; // новое поле для превью
+
+            const fileSizeFormatted = formatFileSize(fileSize);
+
+            if (isImage) {
+                // Используем превью если доступно, иначе оригинальный URL
+                const imageUrl = previewUrl || fileUrl;
+
                 result += `
-                <div class="file-container image-file">
-                    <img src="${fileInfo.FileUrl}" 
-                         alt="${fileInfo.OriginalName}"
-                         class="file-preview"
-                         onerror="this.style.display='none'; this.nextElementSibling.style.display='block'"
-                         onclick="window.openFileInViewer('${fileInfo.FileUrl}', '${fileInfo.OriginalName}')">
-                    <div class="image-fallback" style="display: none;">
-                        <span class="image-icon">🖼️</span>
-                        <span class="image-path">${fileInfo.OriginalName}</span>
-                    </div>
-                    <div class="file-info">
-                        <div class="file-name">${fileInfo.OriginalName}</div>
-                        <div class="file-size">${fileSizeFormatted}</div>
-                        <a href="${fileInfo.FileUrl}" 
-                           download="${fileInfo.OriginalName}"
+            <div class="file-container image-file">
+                <img src="${imageUrl}" 
+                     alt="${originalName}"
+                     class="file-preview"
+                     onerror="handleImageError(this)"
+                     onclick="window.open('${fileUrl}', '_blank')">
+                <div class="image-fallback" style="display: none;">
+                    <span class="image-icon">🖼️</span>
+                    <span class="image-path">${originalName}</span>
+                </div>
+                <div class="file-info">
+                    <div class="file-name">${originalName}</div>
+                    <div class="file-size">${fileSizeFormatted}</div>
+                    <div class="file-actions">
+                        <a href="${fileUrl}" 
+                           download="${originalName}"
                            class="file-download-btn"
                            onclick="event.stopPropagation()">
                             📥 Скачать
                         </a>
                     </div>
                 </div>
+            </div>
             `;
             } else {
+                // Для не-изображений
                 result += `
-                <div class="file-container">
-                    <div class="file-icon">📄</div>
-                    <div class="file-info">
-                        <div class="file-name">${fileInfo.OriginalName}</div>
-                        <div class="file-size">${fileSizeFormatted}</div>
-                        <a href="${fileInfo.FileUrl}" 
-                           download="${fileInfo.OriginalName}"
+            <div class="file-container">
+                <div class="file-icon">📄</div>
+                <div class="file-info">
+                    <div class="file-name">${originalName}</div>
+                    <div class="file-size">${fileSizeFormatted}</div>
+                    <div class="file-actions">
+                        <a href="${fileUrl}" 
+                           download="${originalName}"
                            class="file-download-btn">
-                            📥 Скачать (${fileSizeFormatted})
+                            📥 Скачать
                         </a>
                     </div>
                 </div>
+            </div>
             `;
             }
         }
 
-        // Обработка текстовых ссылок, включая URL файлов
+        // Обработка текстовых сообщений
         if (text) {
-            const linkRegex = /(https?:\/\/[^\s]+|www\.[^\s]+|\\\\[^\s]+\\[^\s]+|[\w]:\\[^\s]+)/gi;
-            const imageExtensions = /\.(jpg|jpeg|png|gif|bmp|webp|svg)$/i;
-            const isHttpUrl = /^https?:\/\//i;
-            const isFileUrl = /http:\/\/localhost:3001\/uploads\//i;
-
-            const formattedText = text.replace(linkRegex, (match) => {
-                // Проверяем, является ли это URL файла с нашего сервера
-                if (isFileUrl.test(match)) {
-                    const fileName = match.split('/').pop();
-                    const isImage = imageExtensions.test(fileName);
-
-                    if (isImage) {
-                        return `
-                    <div class="uploaded-file image-file">
-                        <img src="${match}" 
-                             alt="${fileName}"
-                             class="file-preview"
-                             onerror="this.style.display='none'; this.nextElementSibling.style.display='block'"
-                             onclick="window.openFileInViewer('${match}', '${fileName}')">
-                        <div class="image-fallback" style="display: none;">
-                            <span class="image-icon">🖼️</span>
-                            <span class="image-name">${fileName}</span>
-                        </div>
-                        <div class="file-info">
-                            <a href="${match}" 
-                               download="${fileName}"
-                               class="file-download-link">
-                                📥 ${fileName}
-                            </a>
-                        </div>
-                    </div>
-                    `;
-                    } else {
-                        return `
-                    <div class="uploaded-file">
-                        <div class="file-icon">📄</div>
-                        <div class="file-info">
-                            <a href="${match}" 
-                               download="${fileName}"
-                               class="file-download-link">
-                                📥 ${fileName}
-                            </a>
-                        </div>
-                    </div>
-                    `;
-                    }
-                }
-
-                // Остальная обработка ссылок (как было раньше)
-                let icon = "🔗";
-                let className = "message-link";
-                let isImage = false;
-                let displayText = match;
-
-                if (imageExtensions.test(match)) {
-                    isImage = true;
-                    className = "message-image-link";
-
-                    if (match.match(/^[a-zA-Z]:\\/) || match.startsWith('\\\\')) {
-                        return `
-                    <div class="local-image-container">
-                        <div class="local-image-preview" onclick="window.openLocalImage('${match.replace(/'/g, "\\'")}')">
-                            <span class="local-image-icon">🖼️</span>
-                            <span class="local-image-name">${match.split('\\').pop()}</span>
-                            <span class="local-image-path">${match}</span>
-                        </div>
-                    </div>
-                    `;
-                    }
-
-                    if (isHttpUrl.test(match)) {
-                        return `
-                    <div class="image-container">
-                        <img src="${match}" 
-                             alt="Изображение" 
-                             class="chat-image web-image"
-                             onerror="this.style.display='none'; this.nextElementSibling.style.display='block'"
-                             onclick="window.openImageInNewTab('${match}')">
-                        <div class="image-fallback" style="display: none;">
-                            <span class="image-icon">🖼️</span>
-                            <span class="image-path">${match}</span>
-                        </div>
-                    </div>
-                    `;
-                    }
-                }
-
-                if (match.startsWith('\\\\')) {
-                    icon = "💻";
-                    className = "message-link network-path";
-                } else if (match.match(/^[a-zA-Z]:\\/)) {
-                    icon = "📁";
-                    className = "message-link local-path";
-                } else if (match.startsWith('www.')) {
-                    displayText = `http://${match}`;
-                    icon = "🌐";
-                    className = "message-link web-url";
-                } else if (match.startsWith('http')) {
-                    icon = "🌐";
-                    className = "message-link web-url";
-                }
-
-                return ` <span class="${className}" data-url="${displayText}" data-original="${match}">${icon} ${match}</span> `;
-            });
-
-            result += formattedText;
+            result += `<div class="text-message">${text}</div>`;
         }
 
         return result;
+    };
+
+    // Функция для обработки ошибок загрузки изображений
+    const handleImageError = (imgElement) => {
+        imgElement.style.display = 'none';
+        const fallback = imgElement.nextElementSibling;
+        if (fallback && fallback.classList.contains('image-fallback')) {
+            fallback.style.display = 'block';
+        }
     };
 
     const normalizeMessage = (msg) => {
@@ -624,51 +634,91 @@ function App() {
     };
 
     const formatFileMessage = (fileData) => {
-        const { originalName, fileUrl, fileSize, isImage, text } = fileData;
+        const {
+            originalName,
+            fileSize,
+            isImage,
+            text,
+            serverFileName,
+            previewFileName
+        } = fileData;
+
         const sizeFormatted = formatFileSize(fileSize);
+
+        // Серверные URL
+        const getServerUrl = (fileName) => {
+            return `https://localhost:7192/api/File/download/${encodeURIComponent(fileName)}`;
+        };
+
+        const getPreviewUrl = (fileName) => {
+            return `https://localhost:7192/api/File/preview/${encodeURIComponent(fileName)}`;
+        };
+
+        const imageUrl = previewFileName ? getPreviewUrl(previewFileName) : null;
+        const downloadUrl = getServerUrl(serverFileName || originalName);
 
         let fileHtml = '';
 
-        if (isImage) {
+        if (isImage && imageUrl) {
             fileHtml = `
-            <div class="uploaded-file image-file">
-                <img src="${fileUrl}" 
-                     alt="${originalName}"
-                     class="file-preview"
-                     onerror="this.style.display='none'; this.nextElementSibling.style.display='block'"
-                     onclick="window.openFileInViewer('${fileUrl}', '${originalName}')">
-                <div class="image-fallback" style="display: none;">
-                    <span class="image-icon">🖼️</span>
-                    <span class="image-name">${originalName}</span>
-                </div>
-                <div class="file-info">
-                    <a href="${fileUrl}" 
-                       download="${originalName}"
-                       class="file-download-link"
-                       onclick="event.stopPropagation()">
-                        📥 ${originalName} (${sizeFormatted})
-                    </a>
-                </div>
+        <div class="uploaded-file image-file">
+            <img src="${imageUrl}" 
+                 alt="${originalName}"
+                 class="file-preview"
+                 onerror="this.style.display='none'; this.nextElementSibling.style.display='block'"
+                 onclick="window.open('${downloadUrl}', '_blank')">
+            <div class="image-fallback" style="display: none;">
+                <span class="image-icon">🖼️</span>
+                <span class="image-name">${originalName}</span>
             </div>
-        `;
+            <div class="file-info">
+                <div class="file-name">${originalName}</div>
+                <div class="file-size">${sizeFormatted}</div>
+                <a href="${downloadUrl}" 
+                   download="${originalName}"
+                   class="file-download-link"
+                   onclick="event.stopPropagation()">
+                    📥 Скачать
+                </a>
+            </div>
+        </div>
+    `;
+        } else if (isImage) {
+            // Если нет превью, но это изображение
+            fileHtml = `
+        <div class="uploaded-file">
+            <div class="file-icon">🖼️</div>
+            <div class="file-info">
+                <div class="file-name">${originalName}</div>
+                <div class="file-size">${sizeFormatted}</div>
+                <a href="${downloadUrl}" 
+                   download="${originalName}"
+                   class="file-download-link">
+                    📥 Скачать изображение
+                </a>
+            </div>
+        </div>
+    `;
         } else {
+            // Для не-изображений
             fileHtml = `
-            <div class="uploaded-file">
-                <div class="file-icon">📄</div>
-                <div class="file-info">
-                    <a href="${fileUrl}" 
-                       download="${originalName}"
-                       class="file-download-link">
-                        📥 ${originalName} (${sizeFormatted})
-                    </a>
-                </div>
+        <div class="uploaded-file">
+            <div class="file-icon">📄</div>
+            <div class="file-info">
+                <div class="file-name">${originalName}</div>
+                <div class="file-size">${sizeFormatted}</div>
+                <a href="${downloadUrl}" 
+                   download="${originalName}"
+                   class="file-download-link">
+                    📥 Скачать
+                </a>
             </div>
-        `;
+        </div>
+    `;
         }
 
-        // Добавляем текстовое сообщение если есть
         if (text && text.trim()) {
-            return `${detectAndFormatLinks(text)}<br/>${fileHtml}`;
+            return `<div class="text-content">${detectAndFormatLinks(text)}</div>${fileHtml}`;
         }
 
         return fileHtml;
@@ -703,8 +753,6 @@ function App() {
         }
     };
 
-
-
     const uploadFileToServer = async (file) => {
         if (!connection || !selectedUser) return;
 
@@ -716,65 +764,169 @@ function App() {
         setIsUploading(true);
         setUploadProgress(0);
 
+        let fileName = '';
+        let filePath = '';
+        let previewUrl = null;
+
+
         try {
-            // СОЗДАЕМ ПРЕВЬЮ И BLOB URL ДО ТОГО КАК ИСПОЛЬЗОВАТЬ ФАЙЛ
-            let imagePreviewUrl = null;
-            let fileBlobUrl = null;
+            const fileName = `${Date.now()}_${file.name.replace(/[^a-zA-Z0-9.]/g, '_')}`;
+            const formData = new FormData();
+            formData.append('file', file);
+            formData.append('fileName', fileName);
 
-            if (file.type.startsWith('image/')) {
-                imagePreviewUrl = URL.createObjectURL(file);
-            }
+            const backendUrl = 'https://localhost:7192';
+            const apiUrl = `${backendUrl}/api/File/upload`;
 
-            // Создаем Blob URL для скачивания
-            fileBlobUrl = URL.createObjectURL(file);
-
-            // Сохраняем размер ДО использования файла
-            const fileSize = file.size;
-
-            // Теперь используем файл для сохранения
-            const handle = await window.showSaveFilePicker({
-                suggestedName: file.name,
-                types: [{
-                    description: 'Files',
-                    accept: {
-                        [file.type]: file.type.includes('/') ?
-                            [`.${file.type.split('/')[1]}`] :
-                            ['.bin']
-                    }
-                }]
+            const response = await fetch(apiUrl, {
+                method: 'POST',
+                body: formData,
+                credentials: 'include'
             });
 
-            const writable = await handle.createWritable();
-            await writable.write(await file.arrayBuffer());
-            await writable.close();
+            if (!response.ok) throw new Error('Ошибка сохранения файла');
+
+            const result = await response.json();
+            console.log('Файл сохранен через API:', result);
+
+            // Используем серверные URL вместо временных Blob URL
+            const getServerUrl = (fileName) => {
+                return `https://localhost:7192/api/File/download/${encodeURIComponent(fileName)}`;
+            };
+
+            const getPreviewUrl = (fileName) => {
+                return `https://localhost:7192/api/File/preview/${encodeURIComponent(fileName)}`;
+            };
 
             const fileMessage = {
                 type: 'file',
                 originalName: file.name,
-                fileUrl: fileBlobUrl,
-                fileSize: fileSize, // Используем сохраненный размер
+                filePath: result.filePath,
+                fileSize: file.size,
                 text: message,
                 isImage: file.type.startsWith('image/'),
-                previewUrl: imagePreviewUrl
+                mimeType: file.type,
+                previewUrl: result.previewFileName ? getPreviewUrl(result.previewFileName) : null,
+                serverFileName: result.fileName,
+                previewFileName: result.previewFileName,
+                status: 'uploaded'
             };
 
             if (connection.state === 'Connected') {
                 await connection.invoke('SendMessage', selectedUser.userId, JSON.stringify(fileMessage));
                 setMessageText('');
-            } else {
-                throw new Error('Соединение прервано');
             }
+            setIsUploading(false);
 
         } catch (error) {
-            console.error('Ошибка загрузки файла:', error);
+            // ... обработка ошибок
+        }
+    };
 
-            if (connection.state === 'Connected') {
-                await connection.invoke('SendMessage', selectedUser.userId,
-                    `${message ? message + '\n' : ''}📎 Файл: ${file.name} (${formatFileSize(file.size)})`);
+    // Функция для отображения превью изображений
+    const renderFileMessage = (message) => {
+        try {
+            const fileData = JSON.parse(message.messageText);
+
+            return (
+                <div className="file-message" style={{ margin: '10px 0', padding: '10px', border: '1px solid #ddd', borderRadius: '8px' }}>
+                    {/* Текст сообщения */}
+                    {fileData.text && (
+                        <div style={{ marginBottom: '10px' }}>
+                            {fileData.text}
+                        </div>
+                    )}
+
+                    {/* Превью изображения */}
+                    {fileData.isImage && fileData.previewUrl && (
+                        <div style={{ marginBottom: '10px' }}>
+                            <img
+                                src={fileData.previewUrl}
+                                alt={fileData.originalName}
+                                style={{
+                                    maxWidth: '300px',
+                                    maxHeight: '300px',
+                                    borderRadius: '4px',
+                                    cursor: 'pointer'
+                                }}
+                                onClick={() => window.open(fileData.previewUrl, '_blank')}
+                            />
+                        </div>
+                    )}
+
+                    {/* Информация о файле */}
+                    <div style={{ fontSize: '14px', color: '#666' }}>
+                        <div>📎 {fileData.originalName}</div>
+                        <div>📦 {formatFileSize(fileData.fileSize)}</div>
+                        {fileData.status === 'pending' && (
+                            <div style={{ color: '#ff9500' }}>⏳ Файл будет сохранен позже</div>
+                        )}
+                        {fileData.status === 'uploaded' && (
+                            <div style={{ color: '#34c759' }}>✅ Файл сохранен на сервере</div>
+                        )}
+                    </div>
+
+                    {/* Кнопка скачивания */}
+                    <button
+                        onClick={() => downloadFile(fileData)}
+                        style={{
+                            marginTop: '8px',
+                            padding: '6px 12px',
+                            backgroundColor: '#007bff',
+                            color: 'white',
+                            border: 'none',
+                            borderRadius: '4px',
+                            cursor: 'pointer'
+                        }}
+                    >
+                        📥 Скачать
+                    </button>
+                </div>
+            );
+        } catch (e) {
+            return <div>{message.messageText}</div>;
+        }
+    };
+
+
+    // Функция для скачивания файлов
+    const downloadFile = async (fileData) => {
+        try {
+            if (fileData.status === 'uploaded' && fileData.serverFileName) {
+                // Скачиваем с сервера
+                const response = await fetch(`https://localhost:7192/api/File/download/${fileData.serverFileName}`, {
+                    credentials: 'include'
+                });
+
+                if (response.ok) {
+                    const blob = await response.blob();
+                    const url = window.URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = fileData.originalName;
+                    document.body.appendChild(a);
+                    a.click();
+                    window.URL.revokeObjectURL(url);
+                    document.body.removeChild(a);
+                } else {
+                    alert('Не удалось скачать файл');
+                }
+            } else {
+                // Пытаемся использовать Blob URL из превью
+                if (fileData.previewUrl) {
+                    const a = document.createElement('a');
+                    a.href = fileData.previewUrl;
+                    a.download = fileData.originalName;
+                    document.body.appendChild(a);
+                    a.click();
+                    document.body.removeChild(a);
+                } else {
+                    alert('Файл еще не доступен для скачивания');
+                }
             }
-        } finally {
-            setIsUploading(false);
-            setUploadProgress(0);
+        } catch (error) {
+            console.error('Ошибка скачивания:', error);
+            alert('Ошибка при скачивании файла');
         }
     };
 
@@ -796,7 +948,7 @@ function App() {
     };
 
     const insertFileLink = () => {
-        const filePath = prompt('Введите путь к файлу или папке:');
+        const filePath = prompt('Введите путь к файлу или пастке:');
         if (filePath) {
             setMessageText(prev => prev ? `${prev} ${filePath}` : filePath);
         }
@@ -806,6 +958,55 @@ function App() {
         const url = prompt('Введите URL ссылку:');
         if (url) {
             setMessageText(prev => prev ? `${prev} ${url}` : url);
+        }
+    };
+
+    // Функция для вставки изображения из буфера обмена
+    const pasteImageFromClipboard = async () => {
+        try {
+            // Проверяем поддержку API буфера обмена
+            if (!navigator.clipboard || !navigator.clipboard.read) {
+                alert('Вставка из буфера обмена не поддерживается в вашем браузере');
+                return;
+            }
+
+            // Получаем разрешение на доступ к буферу обмена
+            const permissionStatus = await navigator.permissions.query({
+                name: 'clipboard-read'
+            });
+
+            if (permissionStatus.state === 'denied') {
+                alert('Доступ к буферу обмена запрещен. Разрешите доступ в настройках браузера.');
+                return;
+            }
+
+            // Читаем содержимое буфера обмена
+            const clipboardItems = await navigator.clipboard.read();
+
+            for (const clipboardItem of clipboardItems) {
+                // Ищем изображения в буфере обмена
+                for (const type of clipboardItem.types) {
+                    if (type.startsWith('image/')) {
+                        const blob = await clipboardItem.getType(type);
+
+                        // Создаем файл из blob
+                        const file = new File([blob], 'clipboard-image.png', {
+                            type: blob.type,
+                            lastModified: Date.now()
+                        });
+
+                        // Загружаем файл
+                        uploadFileToServer(file);
+                        return;
+                    }
+                }
+            }
+
+            // Если изображений не найдено
+            alert('В буфере обмена нет изображений');
+        } catch (error) {
+            console.error('Ошибка при вставке из буфера обмена:', error);
+            alert('Не удалось вставить изображение из буфера обмена: ' + error.message);
         }
     };
 
@@ -830,6 +1031,31 @@ function App() {
                 uploadFileToServer(file);
             } else {
                 alert('Файл слишком большой. Максимальный размер: 10MB');
+            }
+        }
+    };
+
+    // Обработчик вставки через Ctrl+V
+    const handlePaste = async (e) => {
+        // Проверяем, есть ли изображения в буфере обмена
+        if (e.clipboardData && e.clipboardData.items) {
+            const items = e.clipboardData.items;
+
+            for (let i = 0; i < items.length; i++) {
+                if (items[i].type.indexOf('image') !== -1) {
+                    e.preventDefault();
+                    const blob = items[i].getAsFile();
+
+                    if (blob) {
+                        const file = new File([blob], 'pasted-image.png', {
+                            type: blob.type,
+                            lastModified: Date.now()
+                        });
+
+                        uploadFileToServer(file);
+                    }
+                    return;
+                }
             }
         }
     };
@@ -913,7 +1139,7 @@ function App() {
                             <div className="context-menu-item" onClick={editMessage}>
                                 ✏️ Редактировать
                             </div>
-                            <div className="context-menu-item" onClick={deleteMessage}>
+                            <div className="context-menu-item" onClick={() => deleteMessage(contextMenu.message.messageId)}>
                                 🗑️ Удалить
                             </div>
                         </>
@@ -923,7 +1149,8 @@ function App() {
                         onClick={() => {
                             setForwardDialog({
                                 visible: true,
-                                comment: ''
+                                comment: '',
+                                multiple: false
                             });
                         }}
                     >
@@ -939,14 +1166,24 @@ function App() {
             )}
 
             {forwardDialog.visible && (
-                <div className="modal-overlay" onClick={() => setForwardDialog({ visible: false, comment: '' })}>
+                <div className="modal-overlay" onClick={() => setForwardDialog({ visible: false, comment: '', multiple: false })}>
                     <div className="path-modal" onClick={(e) => e.stopPropagation()}>
-                        <h3>📤 Переслать сообщение</h3>
+                        <h3>📤 Переслать сообщение{forwardDialog.multiple && ' (несколько)'}</h3>
                         <div className="path-content">
-                            <strong>От:</strong> {contextMenu.message?.sender?.displayName}
-                            <br />
-                            <strong>Текст:</strong> {contextMenu.message?.messageText?.substring(0, 100)}
-                            {contextMenu.message?.messageText?.length > 100 ? '...' : ''}
+                            {forwardDialog.multiple ? (
+                                <>
+                                    <strong>Количество:</strong> {selectedMessages.size} сообщений
+                                    <br />
+                                    <strong>От:</strong> Вы
+                                </>
+                            ) : (
+                                <>
+                                    <strong>От:</strong> {contextMenu.message?.sender?.displayName}
+                                    <br />
+                                    <strong>Текст:</strong> {contextMenu.message?.messageText?.substring(0, 100)}
+                                    {contextMenu.message?.messageText?.length > 100 ? '...' : ''}
+                                </>
+                            )}
                         </div>
 
                         <div style={{ margin: '15px 0' }}>
@@ -997,7 +1234,7 @@ function App() {
                         <div className="modal-buttons">
                             <button
                                 className="modal-button close-button"
-                                onClick={() => setForwardDialog({ visible: false, comment: '' })}
+                                onClick={() => setForwardDialog({ visible: false, comment: '', multiple: false })}
                             >
                                 Отмена
                             </button>
@@ -1140,14 +1377,69 @@ function App() {
                                     </div>
                                 </div>
 
-                                <div className="connection-status">
-                                    <span className={`status-dot ${connectionStatus.toLowerCase()}`}></span>
-                                    {connectionStatus}
-                                    {connectionStatus !== 'Connected' && (
-                                        <button onClick={reconnect} className="reconnect-btn">
-                                            ↻
+                                <div className="header-right">
+                                    {isMultiSelectMode && selectedMessages.size > 0 && (
+                                        <div className="multi-select-actions">
+                                            <span className="selected-count">
+                                                Выбрано: {selectedMessages.size}
+                                            </span>
+                                            <button
+                                                onClick={() => setForwardDialog({ visible: true, comment: '', multiple: true })}
+                                                className="multi-action-btn"
+                                                title="Переслать выбранные"
+                                            >
+                                                📤
+                                            </button>
+                                            <button
+                                                onClick={deleteSelectedMessages}
+                                                className="multi-action-btn delete"
+                                                title="Удалить выбранные"
+                                            >
+                                                🗑️
+                                            </button>
+                                            <button
+                                                onClick={selectAllMessages}
+                                                className="multi-action-btn"
+                                                title="Выбрать все"
+                                            >
+                                                ☑️
+                                            </button>
+                                            <button
+                                                onClick={clearSelection}
+                                                className="multi-action-btn"
+                                                title="Очистить выбор"
+                                            >
+                                                ❌
+                                            </button>
+                                            <button
+                                                onClick={() => setIsMultiSelectMode(false)}
+                                                className="multi-action-btn"
+                                                title="Выйти из режима выбора"
+                                            >
+                                                ←
+                                            </button>
+                                        </div>
+                                    )}
+
+                                    {!isMultiSelectMode && (
+                                        <button
+                                            onClick={() => setIsMultiSelectMode(true)}
+                                            className="multi-select-toggle"
+                                            title="Режим выбора сообщений"
+                                        >
+                                            ☑️
                                         </button>
                                     )}
+
+                                    <div className="connection-status">
+                                        <span className={`status-dot ${connectionStatus.toLowerCase()}`}></span>
+                                        {connectionStatus}
+                                        {connectionStatus !== 'Connected' && (
+                                            <button onClick={reconnect} className="reconnect-btn">
+                                                ↻
+                                            </button>
+                                        )}
+                                    </div>
                                 </div>
                             </div>
 
@@ -1163,9 +1455,25 @@ function App() {
                                         <div
                                             key={msg.messageId || index}
                                             className={`message ${msg.senderId === currentUser?.userId ? 'own' : 'other'} ${msg.isForwarded ? 'message-forwarded' : ''
-                                                }`}
+                                                } ${isMultiSelectMode ? 'selectable' : ''} ${selectedMessages.has(msg.messageId.toString()) ? 'selected' : ''}`}
                                             onContextMenu={(e) => handleContextMenu(e, msg)}
+                                            onClick={(e) => {
+                                                if (isMultiSelectMode) {
+                                                    e.stopPropagation();
+                                                    toggleMessageSelection(msg.messageId);
+                                                }
+                                            }}
                                         >
+                                            {isMultiSelectMode && (
+                                                <div className="message-checkbox">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={selectedMessages.has(msg.messageId.toString())}
+                                                        onChange={() => toggleMessageSelection(msg.messageId)}
+                                                        onClick={(e) => e.stopPropagation()}
+                                                    />
+                                                </div>
+                                            )}
                                             {msg.isForwarded && (
                                                 <div className="message-forwarded-indicator">
                                                     ↪️ Переслано от {msg.originalSender}
@@ -1249,6 +1557,15 @@ function App() {
                                         >
                                             {isUploading ? '⏳' : '📎'}
                                         </button>
+                                        <button
+                                            type="button"
+                                            onClick={pasteImageFromClipboard}
+                                            className="toolbar-btn"
+                                            title="Вставить изображение из буфера обмена"
+                                            disabled={isUploading || !!editingMessage || !clipboardPermission}
+                                        >
+                                            📋
+                                        </button>
                                     </div>
                                     <textarea
                                         value={message}
@@ -1276,6 +1593,7 @@ function App() {
                                         onDragOver={handleDragOver}
                                         onDragLeave={handleDragLeave}
                                         onDrop={handleDrop}
+                                        onPaste={handlePaste}
                                         className={isDragging ? 'dragging' : ''}
                                     />
                                     <button
@@ -1319,6 +1637,8 @@ function App() {
                                 )}
                                 <div className="path-examples">
                                     <small>Примеры: \\server\share\folder или C:\Files\file.txt</small>
+                                    <br />
+                                    <small>Также можно вставлять изображения через Ctrl+V или кнопку 📋</small>
                                 </div>
                             </form>
                         </>
@@ -1338,6 +1658,8 @@ function App() {
                                         <li>Нажмите на ссылку для открытия в проводнике</li>
                                         <li>Используйте кнопки 📁 и 🔗 для быстрой вставки</li>
                                         <li>Загружайте файлы на сервер кнопкой 📎</li>
+                                        <li>Вставляйте изображения из буфера обмена кнопкой 📋 или Ctrl+V</li>
+                                        <li>Новый режим множественного выбора: нажмите ☑️ для выбора нескольких сообщений</li>
                                     </ul>
                                 </div>
                             </div>

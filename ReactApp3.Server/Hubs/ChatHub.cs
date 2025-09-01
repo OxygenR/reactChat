@@ -4,6 +4,7 @@ using ReactApp3.Server.DbContext;
 using System.Threading.Tasks;
 using Microsoft.Extensions.Configuration;
 using System.Security.Claims;
+using MySql.Data.MySqlClient;
 
 namespace ReactApp3.Server.Hubs
 {
@@ -22,23 +23,89 @@ namespace ReactApp3.Server.Hubs
 
         public override async Task OnConnectedAsync()
         {
-            // Создаем тестовых пользователей при первом подключении
-            await _context.CreateTestUsersAsync();
-
-            // Здесь можно получить Windows username из контекста
-            var windowsUsername = Context.User?.Identity?.Name ?? "testuser1"; // Заглушка для теста
-
-            var user = await _context.GetUserByWindowsUsernameAsync(windowsUsername);
-            if (user != null)
+            try
             {
-                _connectedUsers[Context.ConnectionId] = user.UserId;
-                await _context.UpdateUserStatusAsync(user.UserId, true);
+                // Получаем Windows username из контекста аутентификации
+                var windowsUsername = Context.User?.Identity?.Name ;
 
-                // Уведомляем всех об изменении статуса
-                await Clients.All.SendAsync("UserStatusChanged", user.UserId, true);
+                if (string.IsNullOrEmpty(windowsUsername))
+                {
+                    Console.WriteLine("❌ Windows username not found in context");
+                    await base.OnConnectedAsync();
+                    return;
+                }
+
+                Console.WriteLine($"🔗 User connected: {windowsUsername}");
+
+                // Создаем или получаем пользователя
+                var user = await GetOrCreateUserAsync(windowsUsername);
+
+                if (user != null)
+                {
+                    _connectedUsers[Context.ConnectionId] = user.UserId;
+                    await _context.UpdateUserStatusAsync(user.UserId, true);
+
+                    // Уведомляем всех об изменении статуса
+                    await Clients.All.SendAsync("UserStatusChanged", user.UserId, true);
+
+                    Console.WriteLine($"✅ User {user.DisplayName} connected successfully");
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error in OnConnectedAsync: {ex.Message}");
             }
 
             await base.OnConnectedAsync();
+        }
+
+        private async Task<User> GetOrCreateUserAsync(string windowsUsername)
+        {
+            // Пытаемся найти пользователя
+            var user = await _context.GetUserByWindowsUsernameAsync(windowsUsername);
+
+            if (user != null)
+                return user;
+
+            // Создаем нового пользователя если не найден
+            try
+            {
+                var displayName = windowsUsername;
+
+                // Пытаемся извлечь имя из формата DOMAIN\username
+                if (windowsUsername.Contains('\\'))
+                {
+                    displayName = windowsUsername.Split('\\')[1];
+                }
+
+                using (var conn = new MySqlConnection(_configuration.GetConnectionString("DefaultConnection")))
+                {
+                    await conn.OpenAsync();
+                    using (var cmd = new MySqlCommand(
+                        "INSERT INTO Users (WindowsUsername, DisplayName, IsOnline, LastSeen) VALUES (@windowsUsername, @displayName, true, @lastSeen); SELECT LAST_INSERT_ID();", conn))
+                    {
+                        cmd.Parameters.AddWithValue("@windowsUsername", windowsUsername);
+                        cmd.Parameters.AddWithValue("@displayName", displayName);
+                        cmd.Parameters.AddWithValue("@lastSeen", DateTime.Now);
+
+                        var userId = Convert.ToInt32(await cmd.ExecuteScalarAsync());
+
+                        return new User
+                        {
+                            UserId = userId,
+                            WindowsUsername = windowsUsername,
+                            DisplayName = displayName,
+                            IsOnline = true,
+                            LastSeen = DateTime.Now
+                        };
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ Error creating user: {ex.Message}");
+                return null;
+            }
         }
 
         public override async Task OnDisconnectedAsync(Exception exception)
@@ -299,6 +366,14 @@ namespace ReactApp3.Server.Hubs
             {
                 return await _context.GetUserByIdAsync(userId);
             }
+
+            // Если не нашли по connectionId, пробуем получить из Windows аутентификации
+            var windowsUsername = Context.User?.Identity?.Name;
+            if (!string.IsNullOrEmpty(windowsUsername))
+            {
+                return await _context.GetUserByWindowsUsernameAsync(windowsUsername);
+            }
+
             return null;
         }
     }
